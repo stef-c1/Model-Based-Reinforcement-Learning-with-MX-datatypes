@@ -56,6 +56,20 @@ def truncated_normal_init(m: nn.Module):
         m.bias.data.fill_(0.0)
 
 
+def get_layer(model, name):
+    layer = model
+    for attr in name.split("."):
+        layer = getattr(layer, attr)
+    return layer
+
+def set_layer(model, name, layer):
+    try:
+        attrs, name = name.rsplit(".", 1)
+        model = get_layer(model, attrs)
+    except ValueError:
+        pass
+    setattr(model, name, layer)
+
 
 
 
@@ -164,7 +178,7 @@ def main_funct(task='reacher', ind=5, batch_size=32, lr=1e-3, dataformats={'BSE4
 
 
 
-    epochs = [30,120] #[30, 120]
+    epochs = [10,10] #[30, 120]
 
     ###ON CLOUD######################################################################
     # Preprocessing robotics input data to feed into NN
@@ -309,28 +323,77 @@ def main_funct(task='reacher', ind=5, batch_size=32, lr=1e-3, dataformats={'BSE4
     min_logvar_per_batch_robot_dict = {}
     logvar_per_batch_robot_dict = {}
     for format_ in dataformats:
-        if format_ == 'FP32':
-            model = model_copy2
+        cfg_model = {}
+        cfg_model["acts_relu"] = True
+        cfg_model["num_nets"] = 1
+        cfg_model["model_pretrained"] = False
+        cfg_model['use_adam']  = True #True
+        cfg_model['use_adam_8bit']  = False
+        cfg_model['lr'] = lr
+
+        configs = confs[1]
+        cfg_model["q_specs"] = {}
+        cfg_model["q_specs"]['mantissa_bits']  = configs[0]
+        cfg_model["q_specs"]['blk_rows']  = configs[1]
+        cfg_model["q_specs"]['blk_cols']  = configs[2]
+        cfg_model["q_specs"]['rounding']  = "nearest"
+
+        model = module_config.nn_constructor(cfg_model).to(TORCH_DEVICE)
+        model.apply(truncated_normal_init)
+        model.fit_input_stats(train_in2)
+
+
+        if (format_ == 'BSINT8'):
+            doing_mx = 0 #0 is BFP, 1 is MX, 2 is no quantization (FP32) 
+        elif (format_ == 'FP32'):
+            doing_mx = 2
+            print('doing_mx='+str(doing_mx))
         else:
-            if (format_ == 'BSINT8'):
-                doing_mx = 0 #0 is BFP, 1 is MX, 2 is no quantization (FP32) 
-            elif (format_ == 'FP32'):
-                doing_mx = 2
-                print('doing_mx='+str(doing_mx))
-            else:
-                doing_mx = 1
-                
-            EMB_tuple = dataformats[format_]
-            E = EMB_tuple[0]
-            M = EMB_tuple[1]
-            E_bias = EMB_tuple[2]
+            doing_mx = 1
+            
+        EMB_tuple = dataformats[format_]
+        E = EMB_tuple[0]
+        M = EMB_tuple[1]
+        E_bias = EMB_tuple[2]
 
-            model = model_copy2
-            model.q_specs['doing_mx'] = doing_mx
-            model.q_specs['E'] = E
-            model.q_specs['M'] = M
-            model.q_specs['E_bias'] = E_bias
+        model.q_specs['doing_mx'] = doing_mx
+        model.q_specs['E'] = E
+        model.q_specs['M'] = M
+        model.q_specs['E_bias'] = E_bias
 
+
+
+        print(get_layer(model_copy2,'fc1'))
+
+        layer1 = copy.deepcopy(get_layer(model_copy2,'fc1'))
+        layer2 = copy.deepcopy(get_layer(model_copy2,'fc2'))
+        layer3 = copy.deepcopy(get_layer(model_copy2,'fc3'))
+        layer4 = copy.deepcopy(get_layer(model_copy2,'fc4'))
+
+        layer1.q_specs['doing_mx'] = doing_mx
+        layer1.q_specs['E'] = E
+        layer1.q_specs['M'] = M
+        layer1.q_specs['E_bias'] = E_bias
+
+        layer2.q_specs['doing_mx'] = doing_mx
+        layer2.q_specs['E'] = E
+        layer2.q_specs['M'] = M
+        layer2.q_specs['E_bias'] = E_bias
+
+        layer3.q_specs['doing_mx'] = doing_mx
+        layer3.q_specs['E'] = E
+        layer3.q_specs['M'] = M
+        layer3.q_specs['E_bias'] = E_bias
+        
+        layer4.q_specs['doing_mx'] = doing_mx
+        layer4.q_specs['E'] = E
+        layer4.q_specs['M'] = M
+        layer4.q_specs['E_bias'] = E_bias
+
+        set_layer(model,'fc1',layer1)
+        set_layer(model,'fc2',layer2)
+        set_layer(model,'fc3',layer3)
+        set_layer(model,'fc4',layer4)
 
 
             # # Main training loop. Outer - Different configurations. Inner - Across different epochs
@@ -522,4 +585,4 @@ def main_funct(task='reacher', ind=5, batch_size=32, lr=1e-3, dataformats={'BSE4
 # main_funct(task='halfcheetah', ind=0 , batch_size=32, lr=1e-3, dataformats={'BSINT8':(0,0,0), 'FP32':(0,0,0)}, dirpath='trials/run2/')
 # main_funct(task='halfcheetah', ind=0 , batch_size=32, lr=1e-3, dataformats={'BSE4M3':(4,3,7)}, dirpath='trials/run3/')
 
-main_funct(task='reacher', ind=5 , batch_size=64, lr=5e-4, dataformats={'FP32':(0,0,0), 'BSINT8':(0,0,0), 'BSE4M3':(4,3,7)}, dirpath='trials/c_r_test12/', weight_grouping=0)
+main_funct(task='reacher', ind=5 , batch_size=64, lr=5e-4, dataformats={'BSE4M3':(4,3,7), 'FP32':(0,0,0), 'BSINT8':(0,0,0)}, dirpath='trials/c_r_test54/', weight_grouping=0)
