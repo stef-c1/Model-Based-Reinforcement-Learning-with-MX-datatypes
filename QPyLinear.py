@@ -11,6 +11,8 @@ from qtorch.quant import fixed_point_quantize, block_quantize, float_quantize
 from qtorch import FloatingPoint,BlockFloatingPoint,FixedPoint
 from qtorch.quant import Quantizer, quantizer
 
+import time
+
 f_linear = F.linear
 torch_matmul = torch.matmul
 
@@ -40,11 +42,13 @@ def mx_quant(x, mantissa_len, el_exp_len, el_exp_bias, shared_exp_len=8, dim=-1)
 
 
 # Block quantization with tile dimension inputs (Reshape to tiles with padding and quantize and lastly rehape back to original)
-def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, rounding="nearest", log_exp_name="temp", block_granularity='fine', doing_mx=1, E=4, M=3, E_bias=7):    
+def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, rounding="nearest", log_exp_name="temp", block_granularity='fine', doing_mx=1, E=4, M=3, E_bias=7, indices=None):    
     flag = 0
     
     if block_granularity=="large":
         return block_quantize(x, wl=wl, rounding=rounding, dim=-1) # dim=-1 is for complete tensor
+    
+
 
     if len(x.shape)==2:
         x = x.unsqueeze(0)
@@ -81,7 +85,16 @@ def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, ro
 
     x_pad = F.pad(x, (0, ph, 0, pv, 0, 0))
     x_pad_unfold = x_pad.unfold(1,kv,sv).unfold(2,kh,sh).reshape(-1, kv, kh).float()
-    
+
+    if (indices is not None):
+        #sort with saved indices
+        x_flat = x_pad_unfold.flatten()
+        x_sort, indices = x_flat[indices]
+        x_out = x_sort.unflatten(0, x_pad_unfold.size())
+
+        x_pad_unfold = x_out
+
+
     ## Insert block quantization with dimension=0 
     if (doing_mx == 1):#BSExMy
         x_q = mx_quantizer(x_pad_unfold)
@@ -89,6 +102,16 @@ def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, ro
         x_q = blk_quantizer(x_pad_unfold)
     else: #float32
         x_q = x_pad_unfold
+
+    if (indices is not None):
+        #unsort
+        x_flat2 = x_q.flatten()
+        x_sort2 = x_flat2.gather(0, indices.argsort())
+        x_out2 = x_sort2.unflatten(0, x_q.size())
+        
+        x_q = x_out2
+
+    
 
     x_fold_orig = x_q.reshape(-1, nv,nh,kv,kh).permute(0,1,3,2,4).reshape(-1, x_pad.shape[1], x_pad.shape[2])    
     x_quantized = x_fold_orig[:x.shape[0], :x.shape[1], :x.shape[2]]
@@ -99,6 +122,7 @@ def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, ro
     if flag == 2:
         x_quantized = x_quantized.squeeze().squeeze()
         flag = 0
+
         
     return x_quantized
 
@@ -123,6 +147,13 @@ class QPyLinearFunction(torch.autograd.Function):
         E = q_specs.get('E')
         M = q_specs.get('M')
         E_bias = q_specs.get('E_bias')
+        indices_dict = q_specs.get('indices_dict')
+        if (indices_dict is not None):
+            layer = q_specs.get('layer')
+            weight_keys_to_sort = ['fc1.weight', 'fc2.weight', 'fc3.weight', 'fc4.weight']
+            indices = indices_dict[weight_keys_to_sort[layer-1]]
+        else:
+            indices = None
         
         if bias is not None:
             ctx.has_bias = True
@@ -137,7 +168,7 @@ class QPyLinearFunction(torch.autograd.Function):
                                          block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)  # 1XB
 
         qis_weight = block_quantizer_fine(weight, wl=wl, block_size_rows=blk_rows, 
-                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE) # 1XB (linear includes weight transpose - Bx1)
+                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias, indices=indices).to(DEVICE) # 1XB (linear includes weight transpose - Bx1)
         
         if blk_rows==blk_cols:
 #             print('entered')
@@ -171,6 +202,13 @@ class QPyLinearFunction(torch.autograd.Function):
         E = q_specs.get('E')
         M = q_specs.get('M')
         E_bias = q_specs.get('E_bias')
+        indices_dict = q_specs.get('indices_dict')
+        if (indices_dict is not None):
+            layer = q_specs.get('layer')
+            weight_keys_to_sort = ['fc1.weight', 'fc2.weight', 'fc3.weight', 'fc4.weight']
+            indices = indices_dict[weight_keys_to_sort[layer-1]]
+        else:
+            indices = None
                 
         out_dim = weight.shape[0]
         in_dim = weight.shape[1]
@@ -202,10 +240,8 @@ class QPyLinearFunction(torch.autograd.Function):
         grad_weight = torch_matmul(qex_grad_output.transpose(0, 1), qex_input)  # Tr(BX1) X  (BX1)
         # print(f'grad weight {grad_weight.shape}')
         
-        want_to_quantize_weight_gradient = 0
-        if (want_to_quantize_weight_gradient):
-            grad_weight = block_quantizer_fine(grad_weight, wl=wl, block_size_rows=blk_rows, 
-                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
+        grad_weight = block_quantizer_fine(grad_weight, wl=wl, block_size_rows=blk_rows, 
+                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias, indices=indices).to(DEVICE)
         
         #####################################################
         # perform tiling operation for grad_input
@@ -218,7 +254,7 @@ class QPyLinearFunction(torch.autograd.Function):
                                          block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
         else:
             qos_weight = block_quantizer_fine(weight , wl=wl, block_size_rows=blk_cols, 
-                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)   # BX1
+                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias, indices=indices).to(DEVICE)   # BX1
             qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
                                              block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)  # 1XB
         

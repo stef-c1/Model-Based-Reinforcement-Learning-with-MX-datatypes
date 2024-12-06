@@ -60,13 +60,22 @@ class PtModel(nn.Module):
 
         self.in_features = in_features
         self.out_features = out_features
+
         self.q_specs = q_specs
+        q_specs1 = q_specs
+        q_specs2 = q_specs
+        q_specs3 = q_specs
+        q_specs4 = q_specs
+        q_specs1['layer'] = 1
+        q_specs2['layer'] = 2
+        q_specs3['layer'] = 3
+        q_specs4['layer'] = 4
 
 
-        self.fc1 = QPyLinear(in_features, 200, bias=True, q_specs=self.q_specs)
-        self.fc2 = QPyLinear(200, 200, bias=True, q_specs=self.q_specs)
-        self.fc3 = QPyLinear(200, 200, bias=True, q_specs=self.q_specs)
-        self.fc4 = QPyLinear(200, out_features, bias=True, q_specs=self.q_specs)
+        self.fc1 = QPyLinear(in_features, 200, bias=True, q_specs=q_specs1)
+        self.fc2 = QPyLinear(200, 200, bias=True, q_specs=q_specs2)
+        self.fc3 = QPyLinear(200, 200, bias=True, q_specs=q_specs3)
+        self.fc4 = QPyLinear(200, out_features, bias=True, q_specs=q_specs4)
 
         self.inputs_mu = nn.Parameter(torch.zeros(in_features), requires_grad=False)
         self.inputs_sigma = nn.Parameter(torch.zeros(in_features), requires_grad=False)
