@@ -8,14 +8,13 @@ import torch.nn.functional as F
 import numpy as np
 
 from qtorch.quant import fixed_point_quantize, block_quantize, float_quantize
-from qtorch import FloatingPoint,BlockFloatingPoint,FixedPoint
-from qtorch.quant import Quantizer, quantizer
+# from qtorch import FloatingPoint,BlockFloatingPoint,FixedPoint
+# from qtorch.quant import Quantizer, quantizer
 
 f_linear = F.linear
 torch_matmul = torch.matmul
 
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-
 
 def mx_quant(x, mantissa_len, el_exp_len, el_exp_bias, shared_exp_len=8, dim=-1):#dim only crudely added
     size = x.size()
@@ -38,9 +37,8 @@ def mx_quant(x, mantissa_len, el_exp_len, el_exp_bias, shared_exp_len=8, dim=-1)
     z = (shared_exp_value_block * quantized_block.T).T
     return z
 
-
 # Block quantization with tile dimension inputs (Reshape to tiles with padding and quantize and lastly rehape back to original)
-def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, rounding="nearest", log_exp_name="temp", block_granularity='fine', doing_mx=1, E=4, M=3, E_bias=7):    
+def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, rounding="nearest", log_exp_name="temp", block_granularity='fine', mode=0, E=0, M=0, E_bias=0):    
     flag = 0
     
     if block_granularity=="large":
@@ -82,13 +80,16 @@ def block_quantizer_fine(x, wl = 8, block_size_rows = 4, block_size_cols = 4, ro
     x_pad = F.pad(x, (0, ph, 0, pv, 0, 0))
     x_pad_unfold = x_pad.unfold(1,kv,sv).unfold(2,kh,sh).reshape(-1, kv, kh).float()
     
-    ## Insert block quantization with dimension=0 
-    if (doing_mx == 1):#BSExMy
-        x_q = mx_quantizer(x_pad_unfold)
-    elif (doing_mx == 0):#BSINT8
+    # Insert block quantization with dimension=0 
+    if mode==0:
         x_q = blk_quantizer(x_pad_unfold)
-    else: #float32
+    elif mode==1:
+        x_q = mx_quantizer(x_pad_unfold)
+    elif mode==2:
         x_q = x_pad_unfold
+    else:
+        x_q = float_quantize(x_pad_unfold, E, M, rounding=rounding)
+    
 
     x_fold_orig = x_q.reshape(-1, nv,nh,kv,kh).permute(0,1,3,2,4).reshape(-1, x_pad.shape[1], x_pad.shape[2])    
     x_quantized = x_fold_orig[:x.shape[0], :x.shape[1], :x.shape[2]]
@@ -119,25 +120,48 @@ class QPyLinearFunction(torch.autograd.Function):
         blk_cols = q_specs['blk_cols']   # B
         rounding = q_specs['rounding']
         block_granularity = q_specs.get('block_granularity', 'fine')
-        doing_mx = q_specs.get('doing_mx')
-        E = q_specs.get('E')
-        M = q_specs.get('M')
-        E_bias = q_specs.get('E_bias')
+
+
+        mode = q_specs['mode']
+        E = q_specs['E']
+        M = q_specs['M']
+        E_bias = q_specs['E_bias']
+
+        if (isinstance(E, list)):
+            assert(len(E)==4)
+            assert(len(M)==4)
+            assert(len(E_bias)==4)
+            split_quant = 1
+            #0:weights and bias, 1:activations, 2:error, 3:weight update gradient
+        else:
+            split_quant = 0
+
         
         if bias is not None:
             ctx.has_bias = True
-            bf_bias = block_quantizer_fine(bias, wl=wl, block_size_rows=1, 
-                                         block_size_cols=1, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
+            if split_quant:
+                bf_bias = block_quantizer_fine(bias, wl=wl, block_size_rows=1, 
+                                         block_size_cols=1, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[0], M=M[0], E_bias=E_bias[0]).to(DEVICE)
+            else:
+                bf_bias = block_quantizer_fine(bias, wl=wl, block_size_rows=1, 
+                                         block_size_cols=1, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)
         else:
             ctx.has_bias = False
             bf_bias = None
 
-        # Block dimensions for weight and activations are always transposed         
-        qis_input = block_quantizer_fine(input, wl=wl, block_size_rows=blk_rows, 
-                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)  # 1XB
+        # Block dimensions for weight and activations are always transposed        
+        if split_quant:
+            qis_input = block_quantizer_fine(input, wl=wl, block_size_rows=blk_rows, 
+                                            block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[1], M=M[1], E_bias=E_bias[1]).to(DEVICE)  # 1XB
 
-        qis_weight = block_quantizer_fine(weight, wl=wl, block_size_rows=blk_rows, 
-                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE) # 1XB (linear includes weight transpose - Bx1)
+            qis_weight = block_quantizer_fine(weight, wl=wl, block_size_rows=blk_rows, 
+                                            block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[0], M=M[0], E_bias=E_bias[0]).to(DEVICE) # 1XB (linear includes weight transpose - Bx1)
+        else: 
+            qis_input = block_quantizer_fine(input, wl=wl, block_size_rows=blk_rows, 
+                                            block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)  # 1XB
+
+            qis_weight = block_quantizer_fine(weight, wl=wl, block_size_rows=blk_rows, 
+                                            block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE) # 1XB (linear includes weight transpose - Bx1)
         
         if blk_rows==blk_cols:
 #             print('entered')
@@ -167,11 +191,21 @@ class QPyLinearFunction(torch.autograd.Function):
         blk_cols = q_specs['blk_cols']
         rounding = q_specs['rounding']
         block_granularity = q_specs.get('granularity', 'fine')
-        doing_mx = q_specs.get('doing_mx')
-        E = q_specs.get('E')
-        M = q_specs.get('M')
-        E_bias = q_specs.get('E_bias')
-                
+
+        mode = q_specs['mode']
+        E = q_specs['E']
+        M = q_specs['M']
+        E_bias = q_specs['E_bias']
+
+        if (isinstance(E, list)):
+            assert(len(E)==4)
+            assert(len(M)==4)
+            assert(len(E_bias)==4)
+            split_quant = 1
+            #0:weights and bias, 1:activations, 2:error, 3:weight update gradient
+        else:
+            split_quant = 0
+        
         out_dim = weight.shape[0]
         in_dim = weight.shape[1]
 
@@ -184,14 +218,23 @@ class QPyLinearFunction(torch.autograd.Function):
         if blk_rows==blk_cols:
 #             print('entered')
             qex_input = input.to(DEVICE)
-            qex_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_cols, 
-                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
+            if split_quant:
+                qex_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_cols, 
+                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[2], M=M[2], E_bias=E_bias[2]).to(DEVICE)
+            else:
+                qex_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_cols, 
+                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)
         else:
-            qex_input = block_quantizer_fine(input, wl=wl, block_size_rows=blk_cols, 
-                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)   # BX1
-            qex_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_cols, 
-                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)    # BX1
-
+            if split_quant:
+                qex_input = block_quantizer_fine(input, wl=wl, block_size_rows=blk_cols, 
+                                            block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[1], M=M[1], E_bias=E_bias[1]).to(DEVICE)   # BX1
+                qex_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_cols, 
+                                            block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[2], M=M[2], E_bias=E_bias[2]).to(DEVICE)    # BX1
+            else:
+                qex_input = block_quantizer_fine(input, wl=wl, block_size_rows=blk_cols, 
+                                            block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)   # BX1
+                qex_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_cols, 
+                                            block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)    # BX1
         
         # compute grad_weight [out_features, in_features]
         qex_grad_output = qex_grad_output.reshape(-1, out_dim)
@@ -201,11 +244,13 @@ class QPyLinearFunction(torch.autograd.Function):
         # Compute grad_weight
         grad_weight = torch_matmul(qex_grad_output.transpose(0, 1), qex_input)  # Tr(BX1) X  (BX1)
         # print(f'grad weight {grad_weight.shape}')
-        
-        want_to_quantize_weight_gradient = 0
-        if (want_to_quantize_weight_gradient):
+
+        if split_quant:
             grad_weight = block_quantizer_fine(grad_weight, wl=wl, block_size_rows=blk_rows, 
-                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
+                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[3], M=M[3], E_bias=E_bias[3]).to(DEVICE)
+        else:
+            grad_weight = block_quantizer_fine(grad_weight, wl=wl, block_size_rows=blk_rows, 
+                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)
         
         #####################################################
         # perform tiling operation for grad_input
@@ -214,13 +259,23 @@ class QPyLinearFunction(torch.autograd.Function):
         if blk_rows==blk_cols:
 #             print('entered')
             qos_weight = weight.to(DEVICE)
-            qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
-                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
+            if split_quant:
+                qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
+                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[2], M=M[2], E_bias=E_bias[2]).to(DEVICE)
+            else:
+                qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
+                                         block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)
         else:
-            qos_weight = block_quantizer_fine(weight , wl=wl, block_size_rows=blk_cols, 
-                                         block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)   # BX1
-            qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
-                                             block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)  # 1XB
+            if split_quant:
+                qos_weight = block_quantizer_fine(weight , wl=wl, block_size_rows=blk_cols, 
+                                            block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[0], M=M[0], E_bias=E_bias[0]).to(DEVICE)   # BX1
+                qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
+                                                block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[2], M=M[2], E_bias=E_bias[2]).to(DEVICE)  # 1XB
+            else:
+                qos_weight = block_quantizer_fine(weight , wl=wl, block_size_rows=blk_cols, 
+                                            block_size_cols=blk_rows, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)   # BX1
+                qos_grad_output = block_quantizer_fine(grad_output, wl=wl, block_size_rows=blk_rows, 
+                                                block_size_cols=blk_cols, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)  # 1XB
         
         # print(f'grad input operands: {qos_grad_output.shape, qos_weight.shape}')
         # Compute grad_input
@@ -236,8 +291,12 @@ class QPyLinearFunction(torch.autograd.Function):
             grad_bias = None
         else:
             grad_bias = grad_output.reshape(-1, out_dim).sum(0)
-            grad_bias = block_quantizer_fine(grad_bias, wl=wl, block_size_rows=1, 
-                                         block_size_cols=1, rounding=rounding, block_granularity=block_granularity, doing_mx=doing_mx, E=E, M=M, E_bias=E_bias).to(DEVICE)
+            if split_quant:
+                grad_bias = block_quantizer_fine(grad_bias, wl=wl, block_size_rows=1, 
+                                         block_size_cols=1, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E[3], M=M[3], E_bias=E_bias[3]).to(DEVICE)
+            else:
+                grad_bias = block_quantizer_fine(grad_bias, wl=wl, block_size_rows=1, 
+                                         block_size_cols=1, rounding=rounding, block_granularity=block_granularity, mode=mode, E=E, M=M, E_bias=E_bias).to(DEVICE)
             
         
 

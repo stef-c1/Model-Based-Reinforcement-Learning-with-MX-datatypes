@@ -9,7 +9,6 @@ import torch
 from torch import nn as nn
 from torch.nn import functional as F
 from QPyLinear import QPyLinear
-import math
 
 # from config.utils import swish, get_affine_params
 
@@ -113,68 +112,6 @@ class PtModel(nn.Module):
         return mean, torch.exp(logvar)
 
 
-class AdamOptimizer(torch.optim.Optimizer):
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0):
-        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay)
-        super(AdamOptimizer, self).__init__(params, defaults)
-
-    def step(self, closure=None, logger=None):
-        loss = None
-        if closure is not None:
-            loss = closure()
-
-        for group in self.param_groups:
-            for p in group['params']: #p is a set of weights or biases of a layer
-                if p.grad is None:
-                    continue
-                grad = p.grad.data
-                state = self.state[p]
-
-                # Initialize state if first time
-                if len(state) == 0:
-                    state['step'] = 0
-                    state['exp_avg'] = torch.zeros_like(p.data)
-                    state['exp_avg_sq'] = torch.zeros_like(p.data)
-
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                beta1, beta2 = group['betas']
-                eps = group['eps']
-                lr = group['lr']
-                weight_decay = group['weight_decay']
-
-                # Update step count
-                state['step'] += 1
-
-                # Apply weight decay if specified
-                if weight_decay != 0:
-                    grad = grad.add(weight_decay, p.data)
-
-                # Compute the running averages of the gradient and squared gradient
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
-
-                # Bias correction
-                bias_correction1 = 1 - beta1 ** state['step']
-                bias_correction2 = 1 - beta2 ** state['step']
-
-                exp_avg_hat = exp_avg / bias_correction1
-                exp_avg_sq_hat = exp_avg_sq / bias_correction2
-
-                update = exp_avg_hat/(torch.sqrt(exp_avg_sq_hat)+eps)
-                update = torch.where(exp_avg_sq_hat <= 1e-32, 0.0, update)
-
-                # if (exp_avg_sq_hat == 0.0):
-                #     p.data.add_(0)
-                # else:
-                #     # Update parameters
-                #     p.data.addcdiv_(exp_avg_hat, exp_avg_sq_hat.sqrt().add_(eps), value=-lr)
-                
-                p.data.add_(update, alpha=-lr)
-                    
-        return loss
-
-
-
 
 class ReacherConfigModule:
     ENV_NAME = "MBRLReacher3D-v0"
@@ -238,8 +175,7 @@ class ReacherConfigModule:
         acts_relu = model_init_cfg.get("acts_relu", True)
         use_adam = model_init_cfg.get("use_adam", True)
         q_specs =  model_init_cfg.get("q_specs", None)
-        lr = model_init_cfg.get('lr', 1e-3)
-
+        lr = model_init_cfg.get("lr", 1e-3)
 
        # model_init_cfg = {}
         ensemble_size=1  # Set for single models for now 
@@ -248,10 +184,9 @@ class ReacherConfigModule:
                           acts_relu = acts_relu, q_specs=q_specs).to(TORCH_DEVICE)
 
         if use_adam:
-            model.optim = torch.optim.Adam(model.parameters(), lr=lr, eps=1e-8)
+            model.optim = torch.optim.Adam(model.parameters(), lr=lr)
         else:
-            # model.optim = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
-            model.optim = AdamOptimizer(model.parameters(), lr=0.001, eps=0)
+            model.optim = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
         
         return model
 

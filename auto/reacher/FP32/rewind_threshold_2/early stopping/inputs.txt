@@ -1,0 +1,1 @@
+task=reacher, ind=5, confs=[(8, 8, 8), (8, 8, 8)], epochs=[125, 125], batch_size=8, lr=0.0001, dataformats=[['FP32'], ['BSINT8', 'BSE4M3', 'BSE5M2', 'BSE2M3', 'BSE3M2', 'BSE2M1', 'BSE2M1-W/BSE4M3', 'BSE2M3-W/BSE4M3', 'BSE3M2-W/BSE4M3', 'FP32']]

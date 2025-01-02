@@ -192,6 +192,7 @@ class CartpoleConfigModule:
         acts_relu = model_init_cfg.get("acts_relu", True)
         use_adam = model_init_cfg.get("use_adam", True)
         q_specs =  model_init_cfg.get("q_specs", None)
+        lr = model_init_cfg.get("lr", 1e-3)
 
 
         ensemble_size=1  # Set for single models for now 
@@ -200,9 +201,9 @@ class CartpoleConfigModule:
                           acts_relu = acts_relu, q_specs=q_specs).to(TORCH_DEVICE)
         
         if use_adam:
-            model.optim = torch.optim.Adam(model.parameters(), lr=0.001)
+            model.optim = torch.optim.Adam(model.parameters(), lr=lr)
         else:
-            model.optim = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+            model.optim = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9)
 
         return model
 
